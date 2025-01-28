@@ -7,14 +7,37 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(onnxruntime REQUIRED)  # Add this line to find onnxruntime
+
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
 add_executable(b2w_controllers src/b2w_controllers.cpp)
+
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+target_link_libraries(b2w_controllers /home/perfrivik/Downloads/onnxruntime-linux-x64-1.20.1/lib64/libonnxruntime.so)
+
+
+ament_target_dependencies(b2w_controllers rclcpp std_msgs sensor_msgs geometry_msgs nav_msgs onnxruntime)  # Add onnxruntime here
+
+# target_include_directories(b2w_controllers PUBLIC
+#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+#   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
 target_include_directories(b2w_controllers PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
+  $<INSTALL_INTERFACE:include>
+  $ENV{ONNXRUNTIME_ROOT}/include
+)
+
 target_compile_features(b2w_controllers PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
 install(TARGETS b2w_controllers
