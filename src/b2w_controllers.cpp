@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <filesystem> // C++17 feature for paths
+#include <chrono>
 
 B2WControllers::B2WControllers()
     : Node("b2w_controllers"),
@@ -69,11 +70,22 @@ B2WControllers::B2WControllers()
     velocity_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
     "cmd_vel", 10, std::bind(&B2WControllers::velocityCallback, this, std::placeholders::_1));
 
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>("/world/obstacles/model/b2w/joint_state", 10, std::bind(&B2WControllers::jointStateCallback, this, std::placeholders::_1));
+
     action_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/joint_commands", 10);
 
     // Timer to ensure 50 Hz frequency
-    timer_ = this->create_wall_timer(
-    std::chrono::milliseconds(20), std::bind(&B2WControllers::inference, this));
+    // timer_ = this->create_wall_timer(
+    // std::chrono::milliseconds(20), std::bind(&B2WControllers::inference, this));
+
+    // Set the 'use_sim_time' parameter to true
+    this->set_parameter(rclcpp::Parameter("use_sim_time", true));
+
+    // Create a timer that uses the node's clock (simulation time)
+    timer_ = this->create_timer(
+        std::chrono::milliseconds(20),  // 50Hz = 20ms
+        std::bind(&B2WControllers::inference, this));
+
 
     RCLCPP_INFO(this->get_logger(), "B2W Controllers node has been initialized.");
     RCLCPP_INFO(this->get_logger(), "B2W Controllers node has been initialized.");
@@ -108,6 +120,14 @@ void B2WControllers::velocityCallback(const geometry_msgs::msg::Twist::SharedPtr
     cmd_vel_ = *msg;
 }
 
+void B2WControllers::jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    stored_positions_ = msg->position;
+    stored_velocities_ = msg->velocity;
+
+    joint_positions_ = Eigen::Map<Eigen::VectorXd>(stored_positions_.data(), stored_positions_.size());
+    joint_velocities_ = Eigen::Map<Eigen::VectorXd>(stored_velocities_.data(), stored_velocities_.size());
+}
+
 void B2WControllers::processOdometry() {
 
     if (!odometry_received_) {
@@ -117,11 +137,12 @@ void B2WControllers::processOdometry() {
 
     printf("processing odometry\n");
 
-    std::lock_guard<std::mutex> lock(odometry_mutex_);
+    // std::lock_guard<std::mutex> lock(odometry_mutex_);
     Eigen::Vector3d gravity(0, 0, -9.81);
     projected_gravity_ = rotation_matrix_ * gravity;
     
-    RCLCPP_INFO(this->get_logger(), "Processed odometry at 50 Hz");
+    // RCLCPP_INFO(this->get_logger(), "Processed odometry at 50 Hz");
+    printf("Processed odometry at 50 Hz\n");
 }
 
 void B2WControllers::inference() {
@@ -159,10 +180,52 @@ void B2WControllers::inference() {
         input_data[44 + i] = last_actions_[i];
     }
 
-    printf("Input data:\n");
+    // printf("Input data:\n");
     // for (Eigen::Index i = 0; i < input_data.size(); ++i) {
     //     printf("%.2f\n", input_data[i]);
     // }
+    printf("base_line_vel input");
+    printf("%.2f\n", base_lin_vel_.x);
+    printf("%.2f\n", base_lin_vel_.y);
+    printf("%.2f\n", base_lin_vel_.z);
+    printf("");
+
+    printf("base_ang_vel input");
+    printf("%.2f\n", base_ang_vel_.x);
+    printf("%.2f\n", base_ang_vel_.y);
+    printf("%.2f\n", base_ang_vel_.z);
+    printf("");
+
+    printf("projected_gravity input");
+    printf("%.2f\n", projected_gravity_.x());
+    printf("%.2f\n", projected_gravity_.y());
+    printf("%.2f\n", projected_gravity_.z());
+    printf("");
+
+    printf("cmd_vel input");
+    printf("%.2f\n", cmd_vel_.linear.x);
+    printf("%.2f\n", cmd_vel_.linear.y);
+    printf("%.2f\n", cmd_vel_.linear.z);
+    printf("");
+
+    printf("joint_positions input");
+    for (Eigen::Index i = 0; i < joint_positions_.size(); ++i) {
+        printf("%.2f\n", joint_positions_[i]);
+    }
+    printf("");
+
+    printf("joint_velocities input");
+    for (Eigen::Index i = 0; i < joint_velocities_.size(); ++i) {
+        printf("%.2f\n", joint_velocities_[i]);
+    }
+    printf("");
+
+    printf("last_actions input");
+    for (Eigen::Index i = 0; i < last_actions_.size(); ++i) {
+        printf("%.2f\n", last_actions_[i]);
+    }
+    printf("");
+
 
     std::vector<int64_t> input_shape = {1, 60};
 
@@ -195,12 +258,13 @@ void B2WControllers::inference() {
 
         RCLCPP_INFO(this->get_logger(), "Inference output:");
         printf("Inference output:\n");
-        for (Eigen::Index i = 0; i < last_actions_.size(); ++i) {
-            RCLCPP_INFO(this->get_logger(), "%.2f", last_actions_(i));
-        }
+        // for (Eigen::Index i = 0; i < last_actions_.size(); ++i) {
+        //     RCLCPP_INFO(this->get_logger(), "%.2f", last_actions_(i));
+        // }
     } catch (const Ort::Exception& e) {
         RCLCPP_ERROR(this->get_logger(), "ONNX Runtime error: %s", e.what());
         printf("ONNX Runtime error: %s\n", e.what());
+        printf("im in hereeee");
     }
 
     // std::vector<int> joint_inidices = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
