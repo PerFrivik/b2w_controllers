@@ -26,10 +26,10 @@ B2WControllers::B2WControllers()
     // session_ = Ort::Session(env_, model_path.c_str(), Ort::SessionOptions());
     
 
-    default_joint_positions_ << 0.0, 0.0, -1.0, 0.0,
-                                0.0, 0.0, -1.0, 0.0,
-                                0.0, 0.0, -1.0, 0.0,
-                                0.0, 0.0, -1.0, 0.0;
+    default_joint_positions_ << 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0,
+                                -1.0, -1.0, -1.0, -1.0,
+                                0.0, 0.0, 0.0, 0.0;
 
     // initialize cmd_vel_ with zeros
     cmd_vel_.linear.x = 0.0;
@@ -44,8 +44,10 @@ B2WControllers::B2WControllers()
     joint_positions_ = Eigen::VectorXd::Zero(16);
     joint_velocities_ = Eigen::VectorXd::Zero(16);
 
+
     // initialize last acitons with zeros
     last_actions_ = Eigen::VectorXd::Zero(16);
+    reordered_actions_ = Eigen::VectorXd::Zero(16);
 
     // // Initialize ONNX input and output names
     // auto input_name_ptr = session_.GetInputNameAllocated(0, allocator_);
@@ -108,6 +110,8 @@ void B2WControllers::odometryCallback(const nav_msgs::msg::Odometry::SharedPtr m
                             msg->pose.pose.orientation.z);
     rotation_matrix_ = quat.toRotationMatrix();
 
+    rotation_matrix_ = rotation_matrix_.transpose();
+
     odometry_received_ = true;
 
     RCLCPP_INFO(this->get_logger(), "Odometry data received.");
@@ -121,8 +125,33 @@ void B2WControllers::velocityCallback(const geometry_msgs::msg::Twist::SharedPtr
 }
 
 void B2WControllers::jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+
     stored_positions_ = msg->position;
     stored_velocities_ = msg->velocity;
+
+    std::vector<int> reorder_indices = {
+        0, 4, 8, 12,  // FL_hip, FR_hip, RL_hip, RR_hip
+        1, 5, 9, 13,  // FL_thigh, FR_thigh, RL_thigh, RR_thigh
+        2, 6, 10, 14, // FL_calf, FR_calf, RL_calf, RR_calf
+        3, 7, 11, 15  // FL_foot, FR_foot, RL_foot, RR_foot
+    };  
+
+    std::vector<double> reordered_positions(16);
+    std::vector<double> reordered_velocities(16);
+
+    // Reorganize using simple loops
+    for (int i = 0; i < 16; ++i) {
+        reordered_positions[i] = stored_positions_[reorder_indices[i]];
+        reordered_velocities[i] = stored_velocities_[reorder_indices[i]];
+    }
+
+    stored_positions_ = reordered_positions;
+    stored_velocities_ = reordered_velocities;
+
+    // print position and velocity information 
+    // for (Eigen::Index i = 0; i < stored_positions_.size(); ++i) {
+    //     printf("Joint %d: position: %.2f, velocity: %.2f\n", i, stored_positions_[i], stored_velocities_[i]);
+    // }
 
     joint_positions_ = Eigen::Map<Eigen::VectorXd>(stored_positions_.data(), stored_positions_.size());
     joint_velocities_ = Eigen::Map<Eigen::VectorXd>(stored_velocities_.data(), stored_velocities_.size());
@@ -138,7 +167,7 @@ void B2WControllers::processOdometry() {
     printf("processing odometry\n");
 
     // std::lock_guard<std::mutex> lock(odometry_mutex_);
-    Eigen::Vector3d gravity(0, 0, -9.81);
+    Eigen::Vector3d gravity(0, 0, -1);
     projected_gravity_ = rotation_matrix_ * gravity;
     
     // RCLCPP_INFO(this->get_logger(), "Processed odometry at 50 Hz");
@@ -163,12 +192,15 @@ void B2WControllers::inference() {
     input_data[0] = base_lin_vel_.x;
     input_data[1] = base_lin_vel_.y;
     input_data[2] = base_lin_vel_.z;
+
     input_data[3] = base_ang_vel_.x;
     input_data[4] = base_ang_vel_.y;
     input_data[5] = base_ang_vel_.z;
+
     input_data[6] = projected_gravity_.x();
     input_data[7] = projected_gravity_.y();
     input_data[8] = projected_gravity_.z();
+
     input_data[9] = cmd_vel_.linear.x;
     input_data[10] = cmd_vel_.linear.y;
     input_data[11] = cmd_vel_.linear.z;
@@ -177,54 +209,44 @@ void B2WControllers::inference() {
     for (Eigen::Index i = 0; i < joint_positions_.size(); ++i) {
         input_data[12 + i] = joint_positions_[i] - default_joint_positions_[i];
         input_data[28 + i] = joint_velocities_[i];
-        input_data[44 + i] = last_actions_[i];
+        input_data[44 + i] = reordered_actions_[i];
     }
 
-    // printf("Input data:\n");
-    // for (Eigen::Index i = 0; i < input_data.size(); ++i) {
-    //     printf("%.2f\n", input_data[i]);
-    // }
-    printf("base_line_vel input");
-    printf("%.2f\n", base_lin_vel_.x);
-    printf("%.2f\n", base_lin_vel_.y);
-    printf("%.2f\n", base_lin_vel_.z);
-    printf("");
+    printf("base_line_vel input\n");
+    printf("base lin vel x: %.2f\n", input_data[0]);
+    printf("base lin vel y: %.2f\n", input_data[1]);
+    printf("base lin vel z: %.2f\n", input_data[2]);
 
-    printf("base_ang_vel input");
-    printf("%.2f\n", base_ang_vel_.x);
-    printf("%.2f\n", base_ang_vel_.y);
-    printf("%.2f\n", base_ang_vel_.z);
-    printf("");
+    printf("base_ang_vel input\n");
+    printf("base ang vel x: %.2f\n", input_data[3]);
+    printf("base ang vel y: %.2f\n", input_data[4]);
+    printf("base ang vel z: %.2f\n", input_data[5]);
 
-    printf("projected_gravity input");
-    printf("%.2f\n", projected_gravity_.x());
-    printf("%.2f\n", projected_gravity_.y());
-    printf("%.2f\n", projected_gravity_.z());
-    printf("");
+    printf("projected_gravity input\n");
+    printf("projected gravity x: %.2f\n", input_data[6]);
+    printf("projected gravity y: %.2f\n", input_data[7]);
+    printf("projected gravity z: %.2f\n", input_data[8]);
 
-    printf("cmd_vel input");
-    printf("%.2f\n", cmd_vel_.linear.x);
-    printf("%.2f\n", cmd_vel_.linear.y);
-    printf("%.2f\n", cmd_vel_.linear.z);
-    printf("");
+    printf("cmd_vel input\n");
+    printf("cmd vel x: %.2f\n", input_data[9]);
+    printf("cmd vel y: %.2f\n", input_data[10]);
+    printf("cmd vel z: %.2f\n", input_data[11]);
 
-    printf("joint_positions input");
+    printf("joint_positions input\n");
     for (Eigen::Index i = 0; i < joint_positions_.size(); ++i) {
-        printf("%.2f\n", joint_positions_[i]);
+        printf("position %.2f\n", input_data[12 + i]);
     }
-    printf("");
 
-    printf("joint_velocities input");
+    printf("joint_velocities input\n");
     for (Eigen::Index i = 0; i < joint_velocities_.size(); ++i) {
-        printf("%.2f\n", joint_velocities_[i]);
+        printf("velocity %.2f\n", input_data[28 + i]);
     }
-    printf("");
 
-    printf("last_actions input");
-    for (Eigen::Index i = 0; i < last_actions_.size(); ++i) {
-        printf("%.2f\n", last_actions_[i]);
+    printf("last_actions input\n");
+    for (Eigen::Index i = 0; i < reordered_actions_.size(); ++i) {
+        printf("last action %.2f\n", input_data[44 + i]);
     }
-    printf("");
+
 
 
     std::vector<int64_t> input_shape = {1, 60};
@@ -285,20 +307,56 @@ void B2WControllers::inference() {
 
     // Create a reordered vector
     Eigen::VectorXd reordered_actions(16);
-    for (size_t i = 0; i < reorder_indices.size(); ++i) {
-        reordered_actions[i] = last_actions_[reorder_indices[i]];
-    }
+    // for (size_t i = 0; i < reorder_indices.size(); ++i) {
+    //     reordered_actions[i] = last_actions_[reorder_indices[i]];
+    // }
+
+    reordered_actions = last_actions_;
+
+
+    // printf("Reordered actions\n");
+    // for (Eigen::Index i = 0; i < reordered_actions.size(); ++i) {
+    //     printf("aaaaaaaaaaaaaaaaaa %.2f\n", reordered_actions(i));
+    // }
+
+    // Scale all non-foot joints (indices 0 to 11)
+    reordered_actions.segment(0, 12) *= 0.5;
+
+    // Scale all foot joints (indices 12 to 15)
+    reordered_actions.segment(12, 4) *= 5.0;
+
+    reordered_actions_ = reordered_actions;
 
     // Publish the reordered actions
     auto msg = std_msgs::msg::Float64MultiArray();
     for (Eigen::Index i = 0; i < reordered_actions.size(); ++i) {
         msg.data.push_back(reordered_actions(i));
     }
+
+    // temporay override to test, set hip to 0.1, thigh to 0.2, calf to 0.3, foot to 0.4
+
+    // for (Eigen::Index i = 0; i < reordered_actions.size(); ++i) {
+    //     if (i < 4) {
+    //         msg.data.push_back(0.1);
+    //     } else if (i < 8) {
+    //         msg.data.push_back(0.2);
+    //     } else if (i < 12) {
+    //         msg.data.push_back(0.3);
+    //     } else {
+    //         msg.data.push_back(0.4);
+    //     }
+    // }
+
     action_pub_->publish(msg);
 
 
     // RCLCPP_INFO(this->get_logger(), "Published actions");
     printf("Published actions\n");
+    // print actions with printf
+    for (Eigen::Index i = 0; i < reordered_actions.size(); ++i) {
+        printf("%.2f\n", reordered_actions(i));
+    }
+
     // print the actions 
     // for (Eigen::Index i = 0; i < last_actions_.size(); ++i) {
     //     RCLCPP_INFO(this->get_logger(), "%.2f", last_actions_(i));
