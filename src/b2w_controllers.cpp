@@ -16,7 +16,7 @@ B2WControllers::B2WControllers()
       last_actions_(16),
       odometry_received_(false),
       session_(env_,
-               (std::filesystem::path(__FILE__).parent_path() / "policy" / "policy_blind_b2w.onnx").string().c_str(),
+               (std::filesystem::path(__FILE__).parent_path() / "policy" / "policy.onnx").string().c_str(),
                Ort::SessionOptions()) {
 
     // std::filesystem::path current_file_path(__FILE__); // Path to this source file
@@ -44,6 +44,9 @@ B2WControllers::B2WControllers()
     joint_positions_ = Eigen::VectorXd::Zero(16);
     joint_velocities_ = Eigen::VectorXd::Zero(16);
 
+    // init h_in_data_ and c_in_data_ with zeros
+    h_in_data_ = std::vector<float>(128, 0.0);
+    c_in_data_ = std::vector<float>(128, 0.0);
 
     // initialize last acitons with zeros
     last_actions_ = Eigen::VectorXd::Zero(16);
@@ -97,27 +100,38 @@ B2WControllers::B2WControllers()
 }
 
 void B2WControllers::odometryCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    std::lock_guard<std::mutex> lock(odometry_mutex_);
+    // std::lock_guard<std::mutex> lock(odometry_mutex_);
     base_lin_vel_ = msg->twist.twist.linear;
     base_ang_vel_ = msg->twist.twist.angular;
 
     printf("Odometry data received\n");
 
     // Extract quaternion and convert to rotation matrix
-    Eigen::Quaterniond quat(msg->pose.pose.orientation.w,
-                            msg->pose.pose.orientation.x,
+    Eigen::Quaterniond quat(msg->pose.pose.orientation.x,
                             msg->pose.pose.orientation.y,
-                            msg->pose.pose.orientation.z);
+                            msg->pose.pose.orientation.z,
+                            msg->pose.pose.orientation.w);
     rotation_matrix_ = quat.toRotationMatrix();
 
-    rotation_matrix_ = rotation_matrix_.transpose();
+    rotation_matrix_ = rotation_matrix_.inverse();
+
+    // tf2::Quaternion quat;
+    // tf2::fromMsg(msg->pose.pose.orientation, quat);
+
+    // tf2::Vector3 gravity_world(0.0, 0.0, -1.0);
+    // tf2::Matrix3x3 rotation_matrix(quat);
+
+    // tf2::Vector3 gravity_robot = rotation_matrix * gravity_world;
+
+    // projected_gravity_ = Eigen::Vector3d(gravity_robot.x(), gravity_robot.y(), gravity_robot.z());
+
 
     odometry_received_ = true;
 
     RCLCPP_INFO(this->get_logger(), "Odometry data received.");
 
     // process odometry
-    processOdometry();
+    // processOdometry();
 }
 
 void B2WControllers::velocityCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
@@ -167,8 +181,11 @@ void B2WControllers::processOdometry() {
     printf("processing odometry\n");
 
     // std::lock_guard<std::mutex> lock(odometry_mutex_);
-    Eigen::Vector3d gravity(0, 0, -1);
+    Eigen::Vector3d gravity(0, 0, -1.0);
     projected_gravity_ = rotation_matrix_ * gravity;
+
+    // print projected gravity
+    printf("Projected gravity: %.2f, %.2f, %.2f\n", projected_gravity_.x(), projected_gravity_.y(), projected_gravity_.z());
     
     // RCLCPP_INFO(this->get_logger(), "Processed odometry at 50 Hz");
     printf("Processed odometry at 50 Hz\n");
@@ -203,7 +220,7 @@ void B2WControllers::inference() {
 
     input_data[9] = cmd_vel_.linear.x;
     input_data[10] = cmd_vel_.linear.y;
-    input_data[11] = cmd_vel_.linear.z;
+    input_data[11] = cmd_vel_.angular.z;
 
     // Fill joint positions and velocities
     for (Eigen::Index i = 0; i < joint_positions_.size(); ++i) {
@@ -247,36 +264,55 @@ void B2WControllers::inference() {
         printf("last action %.2f\n", input_data[44 + i]);
     }
 
+    std::array<int64_t, 2> obs_shape = {1, 60};
+    std::array<int64_t, 3> hidden_shape  = {1, 1, 128};
 
+    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
+        OrtArenaAllocator, OrtMemTypeDefault);
 
-    std::vector<int64_t> input_shape = {1, 60};
-
-    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        memory_info,
-        input_data.data(),
-        input_data.size(),
-        input_shape.data(),
-        input_shape.size()
+    Ort::Value obs_tensor  = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_data.size(),
+        obs_shape.data(), obs_shape.size()
+    );
+    Ort::Value h_in_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, h_in_data_.data(), h_in_data_.size(),
+        hidden_shape.data(), hidden_shape.size()
+    );
+    Ort::Value c_in_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, c_in_data_.data(), c_in_data_.size(),
+        hidden_shape.data(), hidden_shape.size()
     );
 
+    std::vector<const char*> input_node_names = {"obs", "h_in", "c_in"};
+    std::vector<const char*> output_node_names = {"actions", "h_out", "c_out"};
+
+    // Package these into a vector for session.Run()
+    std::vector<Ort::Value> input_tensors;
+    input_tensors.push_back(std::move(obs_tensor));
+    input_tensors.push_back(std::move(h_in_tensor));
+    input_tensors.push_back(std::move(c_in_tensor));
+
     try {
-        // Run the ONNX model
-        output_name_ = "output";
-        input_name_ = "input";
+        // Run inference
         auto output_tensors = session_.Run(
-            Ort::RunOptions{nullptr}, // Default options
-            &input_name_,             // Input names
-            &input_tensor,            // Input tensors
-            1,                        // Number of inputs
-            &output_name_,            // Output names
-            1                         // Number of outputs
+            Ort::RunOptions{nullptr},
+            input_node_names.data(), 
+            input_tensors.data(), 
+            input_tensors.size(),
+            output_node_names.data(), 
+            output_node_names.size()
         );
 
-        // Process the output
-        float* output_data = output_tensors[0].GetTensorMutableData<float>();
-        last_actions_ = Eigen::Map<Eigen::VectorXf>(output_data, 16).cast<double>();
+        //     [actions, h_out, c_out]
+        float* actions_data = output_tensors[0].GetTensorMutableData<float>();
+        float* h_out_data   = output_tensors[1].GetTensorMutableData<float>();
+        float* c_out_data   = output_tensors[2].GetTensorMutableData<float>();
+
+        // Update h_tensor_ and c_tensor_ with new hidden and cell states
+        std::copy(h_out_data, h_out_data + h_in_data_.size(), h_in_data_.begin());
+        std::copy(c_out_data, c_out_data + c_in_data_.size(), c_in_data_.begin());
+
+        last_actions_ = Eigen::Map<Eigen::VectorXf>(actions_data, 16).cast<double>();
 
         RCLCPP_INFO(this->get_logger(), "Inference output:");
         printf("Inference output:\n");
@@ -318,14 +354,18 @@ void B2WControllers::inference() {
     // for (Eigen::Index i = 0; i < reordered_actions.size(); ++i) {
     //     printf("aaaaaaaaaaaaaaaaaa %.2f\n", reordered_actions(i));
     // }
+    reordered_actions_ = reordered_actions;
 
     // Scale all non-foot joints (indices 0 to 11)
+
     reordered_actions.segment(0, 12) *= 0.5;
 
     // Scale all foot joints (indices 12 to 15)
     reordered_actions.segment(12, 4) *= 5.0;
 
-    reordered_actions_ = reordered_actions;
+    reordered_actions.segment(8, 4) = reordered_actions.segment(8, 4) - Eigen::VectorXd::Ones(4);
+    // subtract -1 from all calf joints (indices 8 to 11)
+
 
     // Publish the reordered actions
     auto msg = std_msgs::msg::Float64MultiArray();

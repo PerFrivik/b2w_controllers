@@ -6,6 +6,9 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2/LinearMath/Matrix3x3.h"
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <eigen3/Eigen/Dense>
 #include <mutex>
@@ -59,6 +62,10 @@ private:
     Eigen::Matrix3d rotation_matrix_;
     bool odometry_received_;
     std::mutex odometry_mutex_;
+
+    std::vector<float> h_in_data_;   // Hidden state data buffer
+    std::vector<float> c_in_data_;   // Cell state data buffer
+
 };
 
 
