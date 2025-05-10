@@ -5,6 +5,9 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+set(ONNXRUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+list(APPEND CMAKE_PREFIX_PATH "${ONNXRUNTIME_ROOT}")
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -15,7 +18,10 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(onnxruntime REQUIRED)  # Add this line to find onnxruntime
+# find_package(onnxruntime REQUIRED)  # Add this line to find onnxruntime
+find_package(onnxruntime REQUIRED
+  HINTS "${ONNXRUNTIME_ROOT}"
+)
 
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -27,7 +33,14 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-target_link_libraries(b2w_controllers /home/perfrivik/Downloads/onnxruntime-linux-x64-1.20.1/lib64/libonnxruntime.so)
+set_target_properties(onnxruntime::onnxruntime PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_ROOT}/include"
+)
+
+# target_link_libraries(b2w_controllers /home/perfrivik/Downloads/onnxruntime-linux-x64-1.20.1/lib64/libonnxruntime.so)
+# include_directories(/usr/local/onnxruntime/include)
+
+target_link_libraries(b2w_controllers onnxruntime::onnxruntime)
 
 
 ament_target_dependencies(b2w_controllers rclcpp std_msgs sensor_msgs geometry_msgs nav_msgs onnxruntime tf2 tf2_ros tf2_geometry_msgs)  # Add onnxruntime here
@@ -36,9 +49,8 @@ ament_target_dependencies(b2w_controllers rclcpp std_msgs sensor_msgs geometry_m
 #   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 #   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
 target_include_directories(b2w_controllers PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  $ENV{ONNXRUNTIME_ROOT}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  /usr/local/onnxruntime/include
 )
 
 target_compile_features(b2w_controllers PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
